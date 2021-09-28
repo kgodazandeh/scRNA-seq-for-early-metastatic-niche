@@ -1,0 +1,588 @@
+install.packages('Seurat')
+library(Seurat)
+library(dplyr)
+library(patchwork)
+
+# Load the dataset
+A2_0401 = Read10X('~/OMB/OMB427A2 - 0401/filtered_feature_bc_matrix')
+A2_0401
+
+A1_0401 = Read10X('~/OMB/OMB427A1 - 0401/filtered_feature_bc_matrix')
+A1_0401
+
+A1_0382 = Read10X('~/OMB/OMB427A1 - 0382/filtered_feature_bc_matrix')
+A1_0382
+
+A2_0382 = Read10X('~/OMB/OMB427A2 - 0382/filtered_feature_bc_matrix')
+A2_0382
+
+#intersect data by rownames
+int_genes = Reduce(intersect, list(rownames(A2_0382), rownames(A1_0382), rownames(A1_0401), rownames(A2_0401))
+)
+int_genes
+
+#make a new matrix for each file 
+A2_0382 = A2_0382[int_genes,]
+A1_0382 = A1_0382[int_genes,]
+A1_0401 = A1_0401[int_genes,]
+A2_0401 = A2_0401[int_genes,]
+
+#add 382A1_ ect in front of the colnames so that it could match the doublets colnames
+colnames(A1_0382) = paste("382A1_",colnames(A1_0382), sep="")
+colnames(A2_0382) = paste("382A2_",colnames(A2_0382), sep="")
+colnames(A1_0401) = paste("401A1_",colnames(A1_0401), sep="")
+colnames(A2_0401) = paste("401A2_",colnames(A2_0401), sep="")
+
+#bind cols merges all the files together
+all_data = cbind(A1_0382, A2_0382, A1_0401, A2_0401)
+
+# Initialize the Seurat object with the raw (non-normalized data)
+all_data = CreateSeuratObject(counts = all_data, project = "OMB427", min.cells = 3, min.features = 300)
+
+#create a sample column 
+all_data$sample = substr(rownames(all_data@meta.data),1,5)
+
+#percentage of reads that map to the mitochondrial genome
+all_data[["percent.mt"]] <- PercentageFeatureSet(all_data, pattern = "^mt-")
+
+#violin plot
+VlnPlot(all_data, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3, split.by = "sample", group.by = "sample")
+
+# to filter the mito no. and gene no.
+all_data <- subset(all_data, subset = nFeature_RNA > 300 & nFeature_RNA < 6000 & percent.mt < 10)
+VlnPlot(all_data, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3, split.by = "sample", group.by = "sample")
+
+#Featurescatter
+plot1 <- FeatureScatter(all_data, feature1 = "nFeature_RNA", feature2 = "percent.mt")
+plot2 <- FeatureScatter(all_data, feature1 = "nCount_RNA", feature2 = "nFeature_RNA")
+plot1 + plot2
+
+
+#****************************************************************************
+
+#Normalising the data
+
+all_data <- NormalizeData(all_data, normalization.method = "LogNormalize", scale.factor = 10000)  
+
+#feature selection
+
+all_data <- FindVariableFeatures(all_data, selection.method = "vst", nfeatures = 2000)
+
+# Identify the 10 most highly variable genes
+top10 <- head(VariableFeatures(all_data), 10)
+top10
+
+# plot variable features with and without labels
+plot1 <- VariableFeaturePlot(all_data)
+plot2 <- LabelPoints(plot = plot1, points = top10, repel = TRUE)
+plot1 + plot2
+
+
+#Scaling the data
+
+all.genes <- rownames(all_data)
+all_data <- ScaleData(all_data, features = all.genes)
+
+#Linear dimensional reduction
+all_data <- RunPCA(all_data, features = VariableFeatures(object = all_data))
+dim(all_data)
+# Examine and visualize PCA results a few different ways
+print(all_data[["pca"]], dims = 1:5, nfeatures = 5)
+
+VizDimLoadings(all_data, dims = 1:2, reduction = "pca")
+
+#the genes most variability driven in PC1 and PC2
+DimPlot(all_data, reduction = "pca", group.by = "sample")
+
+#plot PC2 vs PC3
+DimPlot(all_data, reduction = "pca", group.by = "sample", dims = c(2,3))
+
+#plots using nFeature_RNA
+FeaturePlot(all_data, reduction = "pca", c("nFeature_RNA"), dims = c(2,3))
+
+#plots by mito
+FeaturePlot(all_data, reduction = "pca", c("percent.mt"), dims = c(2,3))
+#plots by mito
+FeaturePlot(all_data, reduction = "pca", c("percent.mt"), dims = c(1,2))
+
+#to plot by the Mji67 gene
+FeaturePlot(all_data, reduction = "pca", c("Mki67"), col=c("grey","red"))
+
+#genes the most highly correlated with the PCs
+DimHeatmap(all_data, dims = 1, cells = 500, balanced = TRUE)
+
+DimHeatmap(all_data, dims = 1:15, cells = 500, balanced = TRUE)
+
+#*******************************************************************************
+#Determine the 'dimensionality' of the dataset
+
+#elbow plot
+ElbowPlot(all_data, ndims = 30)
+
+# Determine percent of variation associated with each PC
+pct <- all_data[["pca"]]@stdev / sum(all_data[["pca"]]@stdev) * 100
+
+# Calculate cumulative percents for each PC
+cumu <- cumsum(pct)
+
+# Determine which PC exhibits cumulative percent greater than 90% and % variation associated with the PC as less than 5
+co1 <- which(cumu > 90 & pct < 5)[1]
+
+co1
+
+# Determine the difference between variation of PC and subsequent PC
+co2 <- sort(which((pct[1:length(pct) - 1] - pct[2:length(pct)]) > 0.1), decreasing = T)[1] + 1
+
+# last point where change of % of variation is more than 0.1%.
+co2
+
+# Minimum of the two calculation
+pcs <- min(co1, co2)
+
+pcs
+
+
+# Create a dataframe with values
+plot_df <- data.frame(pct = pct, 
+                      cumu = cumu, 
+                      rank = 1:length(pct))
+library(ggplot2)
+# Elbow plot to visualize 
+ggplot(plot_df, aes(cumu, pct, label = rank, color = rank > pcs)) + 
+  geom_text() + 
+  geom_vline(xintercept = 90, color = "grey") + 
+  geom_hline(yintercept = min(pct[pct > 5]), color = "grey") +
+  theme_bw()
+
+
+#clustering cells
+
+all_data <- FindNeighbors(all_data, graph.name = "graph1", dims = 1:30)
+all_data <- FindClusters(all_data, graph.name = "graph1", resolution = 1.0)
+
+#Run non-linear dimensional reduction (UMAP/tSNE)
+
+all_data <- RunUMAP(all_data, dims = 1:30)
+#UMAP
+DimPlot(all_data, reduction = "umap", label = TRUE)
+#UMAP by sample
+DimPlot(all_data, reduction = "umap", label = TRUE, group.by = "sample")+ NoLegend() + NoAxes()  
+
+#UMAP by cherry
+all_data$cherry = substr(all_data$sample, 4, 5)
+DimPlot(all_data, reduction = "umap", label = TRUE, group.by = "cherry") + NoAxes() 
+
+#*******************************************************************************
+#batch effects
+
+
+#makes a new section where the first 3 characters are categorized
+all_data$batch = substr(all_data$sample, 1, 3)
+
+# split the dataset into a list of two seurat objects (stim and CTRL)
+lung.list = SplitObject(all_data, split.by="batch")
+
+# normalize and identify variable features for each dataset independently
+lung.list <- lapply(X = lung.list, FUN = function(x) {
+  x <- FindVariableFeatures(x, selection.method = "vst", nfeatures = 2000)
+})
+
+
+# select features that are repeatedly variable across datasets for integration
+features <- SelectIntegrationFeatures(object.list = lung.list)
+#perform integration
+lung.anchors <- FindIntegrationAnchors(object.list = lung.list, anchor.features = features)
+
+# this command creates an 'integrated' data assay
+lung.combined <- IntegrateData(anchorset = lung.anchors)
+
+#performing integrated analysis
+DefaultAssay(lung.combined) <- "integrated"
+#feature selection
+
+# Identify the 10 most highly variable genes
+top10 <- head(VariableFeatures(lung.combined), 10)
+
+
+# plot variable features with and without labels
+plot1 <- VariableFeaturePlot(lung.combined)
+plot2 <- LabelPoints(plot = plot1, points = top10, repel = TRUE)
+plot1 + plot2
+
+
+#Scaling the data
+
+all.genes <- rownames(lung.combined)
+lung.combined <- ScaleData(lung.combined, verbose = FALSE)
+
+#Linear dimensional reduction
+lung.combined <- RunPCA(lung.combined, npcs = 30, verbose = FALSE)
+
+# Examine and visualize PCA results a few different ways
+print(lung.combined[["pca"]], dims = 1:5, nfeatures = 5)
+
+VizDimLoadings(lung.combined, dims = 1:2, reduction = "pca")
+
+#the genes most variability driven in PC1 and PC2
+DimPlot(lung.combined, reduction = "pca", group.by = "sample")
+
+#plot PC2 vs PC3
+DimPlot(lung.combined, reduction = "pca", group.by = "sample", dims = c(2,3))
+
+#plots using nFeature_RNA
+FeaturePlot(lung.combined, reduction = "pca", c("nFeature_RNA"), dims = c(2,3))
+
+#plots by mito
+FeaturePlot(lung.combined, reduction = "pca", c("percent.mt"), dims = c(2,3))
+
+#to plot by the Mji67 gene
+FeaturePlot(lung.combined, reduction = "pca", c("Mki67"), col=c("grey","red"))
+
+#genes the most highly correlated with the PCs
+DimHeatmap(lung.combined, dims = 1, cells = 500, balanced = TRUE)
+
+DimHeatmap(lung.combined, dims = 1:15, cells = 500, balanced = TRUE)
+
+#elbow plot to determine the no. of PCs
+ElbowPlot(lung.combined, ndims = 30)
+
+#Run non-linear dimensional reduction (UMAP/tSNE)
+lung.combined <- RunUMAP(lung.combined, reduction = "pca", dims = 1:30)
+
+#clustering cells
+lung.combined <- FindNeighbors(lung.combined, reduction = "pca", dims = 1:30)
+lung.combined <- FindClusters(lung.combined, resolution = 0.8)
+
+#change to RNA
+DefaultAssay(lung.combined) <- "RNA"
+
+#Find all markers
+lung.markers <- FindAllMarkers(lung.combined, only.pos = TRUE, min.pct = 0.25, logfc.threshold = 0.25)
+
+#UMAP 
+DimPlot(lung.combined, reduction = "umap", label = TRUE, group.by = "sample")+ NoAxes()
+
+colors = read.table('colors_plots.txt', header=F, sep = '\t', stringsAsFactors = F, comment.char = '')
+DimPlot(lung.combined, reduction = "umap", cols = colors$V1[c(1:30)], label = TRUE) + NoAxes()
+
+#********************************************************************************
+#top 10 markers
+FeaturePlot(lung.combined, features = c("Gzma", "Sftpc", "S100a8", "S100a9"))
+
+FeaturePlot(lung.combined, features = c("Sftpa1", "Ccl8", "Saa3", "Retnlg", "Sftpb","Cxcl15"))
+
+#b cells
+FeaturePlot(lung.combined, features = c("Cd79a", "Cd79b", "Cd19", "Ms4a1"))   
+
+#neutrophils
+FeaturePlot(lung.combined, features = c("Ly6g", "Mmp8", "Mmp9", "S100a8", "S100a9", "Adam8", "Ccr1" ))  
+
+#dc cells dc1
+FeaturePlot(lung.combined, features = c("Batf3", "Xcr1", "Clec9a"))   
+#pdc    Ccr7=migrating cells      #DC downregulates Itgax
+FeaturePlot(lung.combined, features = c("Siglech", "Bst2", "Cd209a", "Ccr7", "Itgax")) 
+
+#dc2 marj
+FeaturePlot(lung.combined, features = c("Cd83", "Il4i1", "Tmem176a", "Cd209a"))   
+#all markers
+
+#migratory dc marj
+FeaturePlot(lung.combined, features = c("Zbtb45", "Batf3", "Flt3", "Id2", "Ccr7")) 
+
+#t cells
+FeaturePlot(lung.combined, features = c("Cd3d", "Cd3e", "Ncr1", "Il7r", "Cd8a", "Cd4"))   
+FeaturePlot(lung.combined, features = c("Sell", "Tcf7", "Lef1", "Gzmb", "Ifng", "Pdcd1"))   
+FeaturePlot(lung.combined, features = c("Il7r")) 
+
+#Alveoral macrophages
+FeaturePlot(lung.combined, features = c("Car4", "Krt79", "Krt19", "Siglecf", "Mki67"))
+
+#macrophages
+FeaturePlot(lung.combined, features = c("Mrc1", "Apoe", "Cd68", "Cd163", "Adgre1"), ncol=3)  
+
+#monocyte derived macrophages
+FeaturePlot(lung.combined, features = c("Cd38", "Cd274", "Slamf7", "Cd86", "Cd82", "Ccr2"), ncol=3)  
+
+#tams (differentiating macros)
+FeaturePlot(lung.combined, features = c("Il1b", "C1qc", "Spp1", "Trem2", "C1qa"), ncol=3)  
+
+#endothelial
+FeaturePlot(lung.combined, features = c("Cdh5", "Pecam1"))
+
+#fibroflast
+FeaturePlot(lung.combined, features = c("Col1a1", "Col1a2", "Pdgfra", "Acta2" ))  
+
+#monocytes
+FeaturePlot(lung.combined, features = c("Fcgr4", "Cx3cr1", "Ly6c1", "Ly6c2"))
+
+#dotmap with all the stuff mirjana used
+DotPlot(lung.combined, features = c("Cd3d", "Cd3e", "Tcf7", "Lef1", "Pdcd1", "Lag3", "Havcr2",
+                                    "Gzmb", "Ifng", "Ncr1", "Cd19", "Ms4a1", "Cd14",
+                                    "Mrc1", "Spp1", "Trem2", "Cx3cr1", "Siglecf", 
+                                    "Ly6g",  "Col1a1", "Fcgr4",
+                                    "Pecam1", "Sftpa1", "Epcam",
+                                    "Siglech", "Bst2", "Clec9a", "Cd209a", "Batf3", "Xcr1",
+                                    "Mki67")) + RotatedAxis()
+
+
+#**************************************************************************
+#labelling mirjana's thing
+
+new.cluster.ids <- c('Inflammatory monocyte derived mac','Alveoral Mac',
+                     'Inflammatory monocyte derived mac','Granulocytes',
+                     'Resident monocyte derived mac','Resident monocyte derived mac',
+                     'Cycling mac','B cells','Alveoral Mac', "Low Quality",
+                     'Inflammatory monocyte','Inflammatory monocyte derived mac',
+                     'Resident monocyte', 'Cycling alveoral mac','Mrc1 mac',
+                     'Effector/Exhausted T cells','Naive T cells','Cycling T cells',
+                     'Endothelial','cDC2','Spp1 Trem2 Mac', "Doublets", 'Migrating DCs', 
+                     'cDC1', 'NK', "Doublets",  'pDC', 'Alveoral epithelial cells', 
+                     'Fibroblasts', 'Mast cells / Basophil')
+
+names(new.cluster.ids) <- levels(lung.combined)
+lung.combined <- RenameIdents(lung.combined, new.cluster.ids)
+lung.combined$CellType = lung.combined@active.ident
+#cherry column
+lung.combined$cherry = substr(lung.combined$sample, 4, 5)
+
+
+#*******************************************************************************
+#removed doublets
+doublets_lung = WhichCells(lung.combined, idents = c("Doublets", "Low Quality"))
+
+write(doublets_lung, "all_doublets.txt")
+
+doublets = read.csv('all_doublets.txt', header=F, stringsAsFactors = F, check.names = F)
+
+#matches the remove_cells file with the all_data file 
+remove_cells = match(doublets$V1, colnames(lung.combined))
+str(lung.combined)
+#removes the matching cells from the all_data file
+lung.combined = lung.combined[,-remove_cells]
+
+#plot UMAPS
+DimPlot(lung.combined, reduction = "umap", cols = colors$V1[c(1:30)], label = TRUE) + NoAxes()
+DimPlot(lung.combined, reduction = "umap", label = FALSE, group.by = "cherry") + NoAxes() 
+DimPlot(lung.combined, split.by = "cherry", label = TRUE, cols = colors$V1[c(1:30)])  + NoAxes()
+
+#*******************************************************************************
+tcells = subset(lung.combined, idents = c("Effector/Exhausted T cells", "Naive T cells", "Cycling T cells"))
+
+
+#Identification of highly variable features (feature selection)
+
+tcells <- FindVariableFeatures(tcells, selection.method = "vst", nfeatures = 2000)
+
+# Identify the 10 most highly variable genes
+top10 <- head(VariableFeatures(tcells), 10)
+top10
+
+PCAPlot(tcells, cols = colors$V1[c(1:30)])
+
+#Scaling the data
+
+all.genes <- rownames(tcells)
+tcells <- ScaleData(tcells, features = all.genes)
+
+#Linear dimensional reduction
+tcells <- RunPCA(tcells, features = VariableFeatures(object = tcells))
+
+# Examine and visualize PCA results a few different ways
+print(tcells[["pca"]], dims = 1:5, nfeatures = 5)
+
+VizDimLoadings(tcells, dims = 1:2, reduction = "pca")
+
+
+#elbow plot
+ElbowPlot(tcells, ndims = 30)
+
+#Cluster the cells
+tcells <- FindNeighbors(tcells, graph.name = "graph1", dims = 1:25)
+tcells <- FindClusters(tcells, graph.name = "graph1", resolution = 0.7)
+
+#Run non-linear dimensional reduction (UMAP/tSNE)
+tcells <- RunUMAP(tcells, dims = 1:25)
+DimPlot(tcells, reduction = "umap", label = TRUE) + NoLegend() + NoAxes() 
+
+# find markers for every cluster compared to all remaining cells, report only the positive ones
+tcells.markers <- FindAllMarkers(tcells, only.pos = TRUE, min.pct = 0.25, logfc.threshold = 0.25)
+tcells.markers %>% group_by(cluster) %>% top_n(n = 2, wt = avg_log2FC)
+
+#umap
+DimPlot(tcells, group.by = "cherry", label = FALSE )  + NoAxes() 
+DimPlot(tcells, label = TRUE ) + NoAxes() 
+
+#split by sample
+DimPlot(tcells, split.by = "cherry") + NoAxes() 
+
+#t cells, ncr11 =NK
+FeaturePlot(tcells, features = c("Cd3d", "Cd3e", "Ncr1"))
+
+#naive t cells
+FeaturePlot(tcells, features = c("Sell", "Tcf7", "Lef1"))
+#fox=treg
+FeaturePlot(tcells, features = c("Cd8a", "Cd4", "Foxp3"))
+
+#cytotoxic
+FeaturePlot(tcells, features = c("Gzmb", "Ifng", "Pdcd1"))
+
+#exhausted  
+FeaturePlot(tcells, features = c("Lag3", "Havcr2", "Pdcd1", "Mki67"))
+
+#gama delta = trdc
+FeaturePlot(tcells, features = c("Trdc", "Tcrg-C1", "Itgar1", "Mki67"))
+
+#t helper cell
+FeaturePlot(tcells, features = c("Ifng", "Tbx21", "Il17a", "Rora"))
+FeaturePlot(tcells, features = c("Ctla4", "Pask", "Cd40lg"))
+FeaturePlot(tcells, features = c("Cd40lg", "Il18r1", "Slamf1"))
+FeaturePlot(tcells, features = c("Gata3", "Il7r"))
+#Ilc1
+FeaturePlot(tcells, features = c("Tbx21", "Cd3d", "Cxcr3"))
+#ilc2
+FeaturePlot(tcells, features = c("Krt1", "Hpgds", "Slamf1"))
+#ilc3
+FeaturePlot(tcells, features = c("Il4i1", "Rorc", "Tnfrsf25", "Tcr6"))
+#ilc2
+FeaturePlot(tcells, features = c("Il4", "Il13", "Gata3", "Rora"))
+
+#top10
+top10 <- tcells.markers %>% group_by(cluster) %>% top_n(n = 10, wt = avg_log2FC)
+top20 <- tcells.markers %>% group_by(cluster) %>% top_n(n = 20, wt = avg_log2FC)
+DoHeatmap(tcells, features = top10$gene) + NoLegend()
+
+new.cluster.ids <- c('Naive T Cells','T Helper','Exhausted T Cells','T Reg','Cytotoxic T cells','Cycling T cells','ILC','Gamma Delta T Cells')
+names(new.cluster.ids) <- levels(tcells)
+tcells <- RenameIdents(tcells, new.cluster.ids)
+tcells$CellType = tcells@active.ident
+DimPlot(tcells, reduction = "umap", label = TRUE, cols = c()) + NoAxes()
+lung$cherry.1 = substr(lung$sample, 4, 5)
+DimPlot(tcells, reduction = "umap", label = FALSE, group.by = "cherry") + NoAxes() 
+
+#***********************************************************************************
+#CELLPHONEDB
+
+#remove T cells
+remove_cells_lung = WhichCells(lung.combined, idents = c("Effector/Exhausted T cells", "Naive T cells", "Cycling T cells"))
+remove_cell = match(remove_cells_lung, colnames(lung.combined))
+lung.combined = lung.combined[,-remove_cell]
+tcells1 = WhichCells(tcells, idents = c('Naive T Cells','T Helper','Exhausted T Cells','T Reg','Cytotoxic T cells','Cycling T cells','ILC','Gamma Delta T Cells'))
+
+#separate by cherry; lung
+cherry.lung= SplitObject(lung.combined, split.by = "cherry")
+split.data <- cherry.lung
+pcherry = split.data$A1
+ncherry = split.data$A2
+
+#separate by cherry; t cells
+tcell.lung= SplitObject(tcells, split.by = "cherry")
+split.data.t <- tcell.lung
+pcherry.t = split.data.t$A1
+ncherry.t = split.data.t$A2
+
+
+###############################################################################
+
+#making the counts file
+#first normalise the data
+
+# Take raw data and normalize it.
+pcherry = NormalizeData(pcherry, normalization.method = "RC", scale.factor = 10000)
+pcherry.t = NormalizeData(pcherry.t, normalization.method = "RC", scale.factor = 10000)
+
+ncherry = NormalizeData(ncherry, normalization.method = "RC", scale.factor = 10000)
+ncherry.t = NormalizeData(ncherry.t, normalization.method = "RC", scale.factor = 10000)
+
+pcherry_all = merge(pcherry, pcherry.t)
+dim(pcherry)
+dim(pcherry.t)
+dim(pcherry_all)
+
+ncherry_all = merge(ncherry, ncherry.t)
+dim(ncherry)
+dim(ncherry.t)
+dim(ncherry_all)
+
+pcherry.count = pcherry_all@assays$RNA@data
+ncherry.count = ncherry_all@assays$RNA@data
+
+#write.table(as.matrix(pcherry_all@assays$RNA@data), "pcherry.count.txt", sep="\t", quote=F, col.names=NA)
+#write.table(as.matrix(ncherry.count), "ncherry.count.txt", sep="\t", quote=F, col.names=NA)
+
+
+#making the metadata file
+#positive metadata
+
+
+pos_lung_cell = cbind(rownames(pcherry@meta.data), as.character(pcherry$CellType))
+pos_t_cells = cbind(rownames(pcherry.t@meta.data), as.character(pcherry.t$CellType))
+
+pos_cells = rbind(pos_lung_cell, pos_t_cells)
+
+#negative metadata
+neg_lung_cell = cbind(rownames(ncherry@meta.data), as.character(ncherry$CellType))
+neg_t_cells = cbind(rownames(ncherry.t@meta.data), as.character(ncherry.t$CellType))
+
+neg_cells = cbind(neg_lung_cell, neg_t_cells)
+
+#all the data
+#positive
+write.table(pos_cells, 'pos_meta.txt', sep = "\t", quote=F, row.names = FALSE, col.names = FALSE)
+#negative
+write.table(neg_cells, 'neg_meta.txt', sep = "\t", quote=F, row.names = FALSE, col.names = FALSE)
+
+
+#converting mouse genes into human orthalouges
+
+pcherry_h = pcherry.count@Dimnames[[1]]
+
+human_mouse = read.csv('human_mouse.txt',sep="\t", stringsAsFactors = F, check.names = F)
+
+#using match function to match the mouse gene to human ensbl id
+v1 = pcherry.count@Dimnames[[1]]
+v2 = human_mouse$`Mouse gene name`
+pos_orth = match(v1, v2)
+pos_orth
+
+#orthalouges
+atlas <- human_mouse
+
+unique_atlas <- data.frame(atlas$`Gene stable ID`,atlas$`Mouse gene name`)
+unique_atlas <- unique(unique_atlas)
+write.table(unique_atlas, "unique_atlas.txt", sep="\t", quote=F, col.names=NA)
+
+#edit file on Excel
+test <- read.csv("test_include_na.txt", header = FALSE, stringsAsFactors = FALSE)
+test[test$V1 == "#N/A",] <- NA
+
+#test = as.list(test)
+pcherry.count@Dimnames[1] <- test
+pcherry.count <- na.omit(pcherry.count)  
+
+
+#neg cells
+ncherry.count = ncherry_all@assays$RNA@data
+
+ntest <- ncherry.count@Dimnames[1]
+
+write.table(ntest, "ntest.count.txt", sep="\t", quote=F, col.names=NA)
+
+dim(pos_t_cells)
+
+unique_neg.atlas <- data.frame(neg.atlas$`Gene stable ID`,neg.atlas$`Mouse gene name`)
+unique_nneg.atlas <- unique(unique_neghongwei)
+write.table(unique_neg.atlas, "unique_neg.atlas.txt", sep="\t", quote=F, col.names=NA)
+
+neg.atlas = read.csv('neg.atlas.txt', header=F, stringsAsFactors = F, check.names = F, col.names = NA)
+
+ntest <- read.csv('neg.atlas.txt', header = FALSE, stringsAsFactors = FALSE)
+ntest[ntest$V1 == "#N/A",] <- NA
+
+
+ncherry.count@Dimnames[1] <- ntest
+
+no_na.ncherry = read.csv('ncherry.count.txt', header=F, stringsAsFactors = F, check.names = F, col.names = NA)
+
+
+write.csv(as.matrix(pcherry.count), "pcherry.count.csv", sep="\t", quote=F, col.names=NA)
+write.csv(as.matrix(ncherry.count), "ncherry.count.csv", sep="\t", quote=F, col.names=NA)
